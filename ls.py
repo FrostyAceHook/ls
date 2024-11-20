@@ -1,129 +1,212 @@
 import argparse
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
-from dataclasses import dataclass
 
 
 
-
-
-# interesting things about a node:
-#   path
-#   is directory?
-#   size
-#   for dir:
-#     number of files
-#     full contents
-#   last modified time
-#   creation time
-
-@dataclass
 class Entry:
-    name: str = ""
-    isdir: bool = False
-    @property
+    def __init__(self, dir_entry):
+        self._name = dir_entry.name
+        self._isdir = dir_entry.is_dir()
+        self._ctime = dir_entry.stat().st_birthtime
+        self._mtime = dir_entry.stat().st_mtime
+        self._size = None
+        self._subfiles = None
+        self._subdirs = None
+
+        # Process files now.
+        if not self._isdir:
+            self._size = dir_entry.stat().st_size
+            self._subfiles = -1
+            self._subdirs = -1
+        # But leave dir processing (since its expensive) for when they queried.
+
     def path(self):
-        return self.name + "/"*self.isdir
+        """ Returns the path of this entry. """
+        return self._name + "/"*(self._isdir)
 
-    _byte_size: int = None
-    _subfiles: int = None
-    _subdirs: int = None
+    def isdir(self):
+        """ Returns true if this entry is a directory. """
+        return self._isdir
 
-    def _dir_process(self):
-        if not self.isdir:
-            raise ValueError("cannot dir process a file")
-        # Process dirs, in a simple dfs.
-        self._byte_size = 0
-        self._subfiles = 0
-        self._subdirs = 0
-        stack = [self.name]
-        while stack:
-            try:
-                it = os.scandir(stack.pop())
-            except OSError:
-                self._byte_size = -1
-                self._subfiles = -1
-                self._subdirs = -1
-            else:
-                with it:
-                    for p in it:
-                        if p.is_file():
-                            self._subfiles += 1
-                            self._byte_size += p.stat().st_size
-                        else:
-                            self._subdirs += 1
-                            stack.append(p.path)
+    def ctime(self):
+        """ Returns the creation time of this entry, as a datetime object. """
+        return datetime.fromtimestamp(self._ctime)
 
-    @property
-    def byte_size(self):
-        if self._byte_size is None:
+    def mtime(self):
+        """ Returns the last modification time of this entry, as a datetime
+        object. """
+        return datetime.fromtimestamp(self._mtime)
+
+    def size(self):
+        """ Returns the size of this entry, in bytes. May return -1, indicating
+        failure to get the size. """
+        if self._size is None:
             self._dir_process()
-        return self._byte_size
-    @property
+        return self._size
+
     def subfiles(self):
+        """ Returns the number of files within the tree of this entry, only
+        applicable for directories. May return -1, indicating failure to get the
+        number of files. """
         if self._subfiles is None:
             self._dir_process()
         return self._subfiles
-    @property
+
     def subdirs(self):
+        """ Returns the number of directories within the tree of this entry, only
+        applicable for directories. May return -1, indicating failure to get the
+        number of directories. """
         if self._subdirs is None:
             self._dir_process()
         return self._subdirs
 
 
-    def size(self, long=False):
-        # short: "xxxU"
-        # long:  "xxxxx UB"
-        size = self.byte_size
-
-        if size < 0:
-            if long:
-                return f" ???? ??"
+    def _dir_process(self):
+        assert self._isdir
+        # Process contents, in a simple dfs.
+        self._size = 0
+        self._subfiles = 0
+        self._subdirs = 0
+        stack = [self._name]
+        while stack:
+            try:
+                it = os.scandir(stack.pop())
+            except OSError:
+                # If any subdirectory fails, we dont report anything for the
+                # directory.
+                self._size = -1
+                self._subfiles = -1
+                self._subdirs = -1
+                break
             else:
-                return f" ???"
-
-        UNITS = ["k", "M", "G", "T", "P"]
-        digits = 5 if (long) else 3
-
-        if long and size <= 1024:
-            return f"{size:>{digits}} B "
-
-        size = float(size) / 1024
-        unit = 0
-        while size >= 1000 and unit < len(UNITS) - 1:
-            size /= 1024
-            unit += 1
-        size = max(1.0, size)
-        if long:
-            units = f" {UNITS[unit]}B"
-        else:
-            units = f"{UNITS[unit]}"
-        s = f"{size:.{digits}f}"
-        s = s[:digits].rstrip(".")
-        return f"{s:>{digits}}{units}"
+                with it:
+                    for p in it:
+                        if p.is_file():
+                            self._subfiles += 1
+                            self._size += p.stat().st_size
+                        else:
+                            self._subdirs += 1
+                            stack.append(p.path)
 
 
-    def sort_name(self):
-        return (not self.isdir, self.name.casefold(), self.name)
 
-    def sort_size(self):
-        return (self.byte_size, *self.sort_name())
-
+class Key:
+    @classmethod
+    def name(cls, entry):
+        p = entry.path()
+        return not entry.isdir(), p.casefold(), p
 
     @classmethod
-    def create(cls, dir_entry):
-        e = cls()
-        e.name = dir_entry.name
-        e.isdir = dir_entry.is_dir()
+    def ctime(cls, entry):
+        return entry.ctime(), *cls.name(entry)
 
-        # Process files now.
-        if not e.isdir:
-            e._byte_size = dir_entry.stat().st_size
+    @classmethod
+    def mtime(cls, entry):
+        return entry.mtime(), *cls.name(entry)
 
-        # Leave dir processing (since its expensive) for when they queried.
-        return e
+    @classmethod
+    def size(cls, entry):
+        return entry.size(), *cls.name(entry)
 
+    @classmethod
+    def subfiles(cls, entry):
+        return entry.subfiles(), *cls.name(entry)
+
+
+
+class Format:
+    # 1024-based prefixes.
+    PREFIXES = ["", "k", "M", "G", "T", "P", "E", "Z", "Y", "R", "Q"]
+
+    @classmethod
+    def number(cls, num, long=False, unit=""):
+        # short: "xxxP"
+        # long:  "xxxxx PU"
+        if num < 0:
+            if long:
+                return " ???? ? "
+            else:
+                return " ???"
+
+        # If short, we dont wanna write 4 digits. In long tho, just use the most
+        # accurate prefix.
+        limit = 1024 if (long) else 1000
+
+        # Find the correct magnitude.
+        try:
+            num = float(num)
+        except OverflowError:
+            num = float("inf")
+        prefix = 0
+        while num >= limit and prefix < len(cls.PREFIXES) - 1:
+            num /= 1024
+            prefix += 1
+
+        # More than quettabytes?
+        if num >= limit:
+            if long:
+                return f" lots {unit} "
+            else:
+                return "lots"
+
+        # Make the final number+prefix+unit.
+        if long:
+            suffix = f" {cls.PREFIXES[prefix] + unit:<2}"
+        else:
+            suffix = f"{cls.PREFIXES[prefix]:<1}"
+        digits = 5 if (long) else 3
+
+        # Special case for short when prefix is "", since we can use the space
+        # for something. If a single-char uit is given, use it for that.
+        # Otherwise, use it for an extra digit.
+        if not long and prefix == 0:
+            if not unit:
+                digits += 1
+                suffix = ""
+            elif len(unit) == 1:
+                suffix = unit
+
+        s = f"{num:.{digits}f}"
+        s = s[:digits]
+        if "." in s:
+            s = s.rstrip("0").rstrip(".")
+        return f"{s:>{digits}}{suffix}"
+
+    @classmethod
+    def time(cls, time, long=False):
+        if long:
+            return time.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            return time.strftime("%Y-%m-%d")
+
+
+
+
+# from brutil import cli
+
+# cli.enqueue("'xxxxx PU'")
+# cli.enqueue("Format._number(1, True, 'B')")
+# cli.enqueue("Format._number(900, True, 'B')")
+# cli.enqueue("Format._number(1000, True, 'B')")
+# cli.enqueue("Format._number(1024, True, 'B')")
+# cli.enqueue("Format._number(1024*11.5, True, 'B')")
+# cli.enqueue("Format._number(1024**2, True, 'B')")
+# cli.enqueue("Format._number(1024**2 - 1, True, 'B')")
+
+# cli.enqueue("'xxxP'")
+# cli.enqueue("Format._number(1, False, 'B')")
+# cli.enqueue("Format._number(900, False, 'B')")
+# cli.enqueue("Format._number(1000, False, 'B')")
+# cli.enqueue("Format._number(1024, False, 'B')")
+# cli.enqueue("Format._number(1024*11.5, False, 'B')")
+# cli.enqueue("Format._number(1024**2, False, 'B')")
+# cli.enqueue("Format._number(1024**2 - 1, False, 'B')")
+# cli.cli(globals())
+
+# quit()
 
 
 class cons:
@@ -189,6 +272,7 @@ class cons:
         return do
 
 
+
 class PRS:
     """ Print running sort. Items are printed in a sorted list, reprinting with
     every insertion. """
@@ -204,14 +288,13 @@ class PRS:
 
     def __exit__(self, etype, evalue, traceback):
         if etype is None:
-            # If succeeded and we doing a running sort, then we gotta wipe the
-            # printed output and reprint the full outupt.
-            if self.key is not None:
-                cons.move_up(len(self.items))
-                for item in self.items:
-                    cons.clear_line()
-                    sys.stdout.write(self.tostr(item) + "\n")
-                sys.stdout.flush()
+            # If succeeded then we gotta wipe the printed output and reprint the
+            # full outupt.
+            cons.move_up(len(self.items))
+            for item in self.items:
+                cons.clear_line()
+                sys.stdout.write(self.tostr(item) + "\n")
+            sys.stdout.flush()
         self.items = None
         return False
 
@@ -234,12 +317,6 @@ class PRS:
         # print.
         self.tostr(elem)
 
-        # If not sorted, just add and print the element.
-        if self.key is None:
-            self.items.append(elem)
-            sys.stdout.write(self.tostr(elem) + "\n")
-            return
-
         # Add the element, maintaining the sort.
         idx = self._bsearch(elem)
         self.items.insert(idx, elem)
@@ -261,35 +338,120 @@ def main():
     parser = argparse.ArgumentParser(prog="ls",
             description="List current directory contents.")
 
+    group_ff = parser.add_mutually_exclusive_group()
+    group_ff.add_argument("-f", "--files", action="store_true",
+            help="only list files")
+    group_ff.add_argument("-F", "--folders", action="store_true",
+            help="only list folders")
+
+    group_ctime = parser.add_mutually_exclusive_group()
+    group_ctime.add_argument("-c", "--ctime", action="store_true",
+            help="include the creation time of entries")
+    group_ctime.add_argument("-C", "--long-ctime", action="store_true",
+            help="include the creation time of entries, in long format")
+
+    group_mtime = parser.add_mutually_exclusive_group()
+    group_mtime.add_argument("-m", "--mtime", action="store_true",
+            help="include the last modification time of entries")
+    group_mtime.add_argument("-M", "--long-mtime", action="store_true",
+            help="include the last modification time of entries, in long format")
+
     group_size = parser.add_mutually_exclusive_group()
     group_size.add_argument("-s", "--size", action="store_true",
             help="include the sizes of entries")
     group_size.add_argument("-S", "--long-size", action="store_true",
             help="include the sizes of entries, in long format")
 
+    group_count = parser.add_mutually_exclusive_group()
+    group_count.add_argument("-n", action="store_true",
+            help="include the number of subfiles and subfolders within folders")
+    group_count.add_argument("-N", action="store_true",
+            help="include the number of subfiles and subfolders within folders, "
+                "in long format")
+
+    # group_display = parser.add_mutually_exclusive_group()
+    # group_display.add_argument("-t", "--tree", action="store_true",
+    #         help="display recursive contents as tree")
+    # group_display.add_argument("-x", "--sort",
+    #         choices=["c", "m", "s"],
+    #         help="sort the output by some attribute (ctime, mtime, size)")
+
     parser.add_argument("-x", "--sort",
-            choices=["x", "s", "size", "n", "name"],
-            help="sort the output by some attribute")
+            choices=["c", "m", "s", "n"], nargs="?", default=0, const=1,
+            help="Sort the output by some attribute (ctime, mtime, size, number "
+                "of subfiles).")
 
 
     args = parser.parse_args()
 
-    components = [lambda e: e.path]
-    if args.size:
-        components.insert(0, lambda e: e.size(long=False))
-    if args.long_size:
-        components.insert(0, lambda e: e.size(long=True))
 
-    key = Entry.sort_name
+    # Get the filter for what to display.
+    cull = lambda e: False
+    if args.files:
+        cull = lambda e: e.isdir()
+    if args.folders:
+        cull = lambda e: not e.isdir()
+
+
+    # Create each of the string/output components.
+    components = []
+    if args.ctime or args.long_ctime:
+        components.append(lambda e: Format.time(e.ctime(), args.long_ctime))
+    if args.mtime or args.long_mtime:
+        components.append(lambda e: Format.time(e.mtime(), args.long_mtime))
+    if args.size or args.long_size:
+        components.append(lambda e: Format.number(e.size(), args.long_size, "B"))
+    if args.n or args.N:
+        def comp(e, n):
+            count = Format.number(n, args.N)
+            if e.isdir():
+                return count
+            return " "*len(count)
+        components.append(lambda e: comp(e, e.subfiles()))
+        components.append(lambda e: comp(e, e.subdirs()))
+    components.append(lambda e: e.path())
+
+    # Get the key to sort by (defaulting to name).
+    key = Key.name
+    # Check inferred sorting.
+    if args.sort == 1:
+        args.sort = ""
+        if args.ctime or args.long_ctime:
+            args.sort += "c"
+        if args.mtime or args.long_mtime:
+            args.sort += "m"
+        if args.size or args.long_size:
+            args.sort += "s"
+        if args.n or args.N:
+            args.sort += "n"
+        if len(args.sort) != 1:
+            parser.error("cannot infer sort key (from '-x')")
+
+    # Update key.
     if args.sort:
-        if args.sort[0] == "x":
-            key = None
-        if args.sort[0] == "s":
-            key = Entry.sort_size
-        if args.sort[0] == "n":
-            key = Entry.sort_name
-    tostr = lambda e: "  ".join(c(e) for c in components)
+        if args.sort == "c":
+            key = Key.ctime
+        if args.sort == "m":
+            key = Key.mtime
+        if args.sort == "s":
+            key = Key.size
+        if args.sort == "n":
+            key = Key.subfiles
 
+
+    # Join the thangs to make the complete string. Note the ordering of each
+    # attribute is fixed (ctime -> mtime -> size -> counts -> path).
+    pad = " " * (len(components) > 1)
+    tostr = lambda e: pad + "  ".join(c(e) for c in components)
+
+
+    # Special printing if no extra attributes or sorting is requested.
+    if len(components) == 1 and key is Key.name:
+        pass
+
+
+    # If any extra attributes or sorting has been requested, do the standard
+    # print-running-sort single-column vertical list.
     with PRS(key, tostr) as prs:
         try:
             it = os.scandir(".")
@@ -298,7 +460,10 @@ def main():
         else:
             with it:
                 for p in it:
-                    prs.insert(Entry.create(p))
+                    e = Entry(p)
+                    if cull(e):
+                        continue
+                    prs.insert(e)
 
 
 if __name__ == "__main__":
