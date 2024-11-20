@@ -1,56 +1,9 @@
+import argparse
 import os
 import sys
 from pathlib import Path
 from dataclasses import dataclass
-from clash import singleton
 
-
-
-
-
-def get_cursor_pos():
-    # https://stackoverflow.com/a/69582478
-
-    import sys
-    import re
-    is_windows = (sys.platform == "win32")
-    if is_windows:
-        import ctypes
-        import ctypes.wintypes
-    else:
-        import termios
-
-    if is_windows:
-        old_stdin_mode = ctypes.wintypes.DWORD()
-        old_stdout_mode = ctypes.wintypes.DWORD()
-        kernel32 = ctypes.windll.kernel32
-        stdin = kernel32.GetStdHandle(-10)
-        stdout = kernel32.GetStdHandle(-11)
-        kernel32.GetConsoleMode(stdin, ctypes.byref(old_stdin_mode))
-        kernel32.SetConsoleMode(stdin, 0)
-        kernel32.GetConsoleMode(stdout, ctypes.byref(old_stdout_mode))
-        kernel32.SetConsoleMode(stdout, 7)
-    else:
-        old_stdin_mode = termios.tcgetattr(sys.stdin)
-        attr = termios.tcgetattr(sys.stdin)
-        attr[3] &= ~(termios.ECHO | termios.ICANON)
-        termios.tcsetattr(sys.stdin, termios.TCSAFLUSH, attr)
-    try:
-        sys.stdout.write("\x1B[6n")
-        sys.stdout.flush()
-        response = ""
-        while not response.endswith("R"):
-            response += sys.stdin.read(1)
-        match = re.match(r".*\[(\d+);(\d+)R", response)
-    finally:
-        if is_windows:
-            kernel32.SetConsoleMode(stdin, old_stdin_mode)
-            kernel32.SetConsoleMode(stdout, old_stdout_mode)
-        else:
-            termios.tcsetattr(sys.stdin, termios.TCSAFLUSH, old_stdin_mode)
-    if match:
-        return (int(match.group(1)), int(match.group(2)))
-    return (-1, -1)
 
 
 
@@ -173,28 +126,64 @@ class Entry:
 
 
 
-@singleton
 class cons:
-    def __init__(self):
-        # hack to enable the control sequences.
-        os.system("")
+    # hack to enable the control sequences.
+    os.system("")
 
-    def clear_line(self):
+    @staticmethod
+    def pos():
+        # https://stackoverflow.com/a/69582478
+
+        import sys
+        import re
+        is_windows = (sys.platform == "win32")
+        if is_windows:
+            import ctypes
+            import ctypes.wintypes
+        else:
+            import termios
+
+        if is_windows:
+            old_stdin_mode = ctypes.wintypes.DWORD()
+            old_stdout_mode = ctypes.wintypes.DWORD()
+            kernel32 = ctypes.windll.kernel32
+            stdin = kernel32.GetStdHandle(-10)
+            stdout = kernel32.GetStdHandle(-11)
+            kernel32.GetConsoleMode(stdin, ctypes.byref(old_stdin_mode))
+            kernel32.SetConsoleMode(stdin, 0)
+            kernel32.GetConsoleMode(stdout, ctypes.byref(old_stdout_mode))
+            kernel32.SetConsoleMode(stdout, 7)
+        else:
+            old_stdin_mode = termios.tcgetattr(sys.stdin)
+            attr = termios.tcgetattr(sys.stdin)
+            attr[3] &= ~(termios.ECHO | termios.ICANON)
+            termios.tcsetattr(sys.stdin, termios.TCSAFLUSH, attr)
+        try:
+            sys.stdout.write("\x1B[6n")
+            sys.stdout.flush()
+            response = ""
+            while not response.endswith("R"):
+                response += sys.stdin.read(1)
+            match = re.match(r".*\[(\d+);(\d+)R", response)
+        finally:
+            if is_windows:
+                kernel32.SetConsoleMode(stdin, old_stdin_mode)
+                kernel32.SetConsoleMode(stdout, old_stdout_mode)
+            else:
+                termios.tcsetattr(sys.stdin, termios.TCSAFLUSH, old_stdin_mode)
+        if match:
+            return (int(match.group(1)), int(match.group(2)))
+        return (-1, -1)
+
+    @staticmethod
+    def clear_line():
         sys.stdout.write("\x1B[2K\r")
 
-    # def move_up(self, by):
-    #     done = 0
-    #     for _ in range(by):
-    #         if get_cursor_pos()[0] == 1:
-    #             break
-    #         sys.stdout.write("\x1B[1A")
-    #         done += 1
-    #     return done
-
-    def move_up(self, by):
+    @staticmethod
+    def move_up(by):
         if by <= 0:
             return 0
-        y, _ = get_cursor_pos()
+        y, _ = cons.pos()
         do = min(y - 1, by)
         sys.stdout.write(f"\x1B[{do}A")
         return do
@@ -215,18 +204,20 @@ class PRS:
 
     def __exit__(self, etype, evalue, traceback):
         if etype is None:
-            cons.move_up(len(self.items))
-            for item in self.items:
-                cons.clear_line()
-                sys.stdout.write(self.tostr(item) + "\n")
-            sys.stdout.flush()
+            # If succeeded and we doing a running sort, then we gotta wipe the
+            # printed output and reprint the full outupt.
+            if self.key is not None:
+                cons.move_up(len(self.items))
+                for item in self.items:
+                    cons.clear_line()
+                    sys.stdout.write(self.tostr(item) + "\n")
+                sys.stdout.flush()
         self.items = None
         return False
 
     def _bsearch(self, elem):
-        left, right = 0, len(self.items)
-
         # Binary search.
+        left, right = 0, len(self.items)
         while left < right:
             mid = (left + right) // 2
             if self.key(self.items[mid]) < self.key(elem):
@@ -243,26 +234,61 @@ class PRS:
         # print.
         self.tostr(elem)
 
+        # If not sorted, just add and print the element.
+        if self.key is None:
+            self.items.append(elem)
+            sys.stdout.write(self.tostr(elem) + "\n")
+            return
+
         # Add the element, maintaining the sort.
         idx = self._bsearch(elem)
         self.items.insert(idx, elem)
 
         # Reprint the elements.
-        up = cons.move_up(len(self.items) - 1)
-        if get_cursor_pos()[0] > 1:
-            up += 1
-        for item in self.items[-up:]:
-            cons.clear_line()
-            sys.stdout.write(self.tostr(item) + "\n")
-        sys.stdout.flush()
+        space = cons.move_up(len(self.items) - 1)
+        # If there's still space on the screen, add another element.
+        if cons.pos()[0] > 1:
+            space += 1
+        if space > 0: # since -0 = 0
+            for item in self.items[-space:]:
+                cons.clear_line()
+                sys.stdout.write(self.tostr(item) + "\n")
+            sys.stdout.flush()
 
 
 
 def main():
-    key = Entry.sort_size
-    # key = Entry.sort_name
-    tostr = lambda e: (e.size(0) + "  " + e.path)
-    # tostr = lambda e: (e.path)
+    parser = argparse.ArgumentParser(prog="ls",
+            description="List current directory contents.")
+
+    group_size = parser.add_mutually_exclusive_group()
+    group_size.add_argument("-s", "--size", action="store_true",
+            help="include the sizes of entries")
+    group_size.add_argument("-S", "--long-size", action="store_true",
+            help="include the sizes of entries, in long format")
+
+    parser.add_argument("-x", "--sort",
+            choices=["x", "s", "size", "n", "name"],
+            help="sort the output by some attribute")
+
+
+    args = parser.parse_args()
+
+    components = [lambda e: e.path]
+    if args.size:
+        components.insert(0, lambda e: e.size(long=False))
+    if args.long_size:
+        components.insert(0, lambda e: e.size(long=True))
+
+    key = Entry.sort_name
+    if args.sort:
+        if args.sort[0] == "x":
+            key = None
+        if args.sort[0] == "s":
+            key = Entry.sort_size
+        if args.sort[0] == "n":
+            key = Entry.sort_name
+    tostr = lambda e: "  ".join(c(e) for c in components)
 
     with PRS(key, tostr) as prs:
         try:
