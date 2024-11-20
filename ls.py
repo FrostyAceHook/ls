@@ -277,7 +277,7 @@ class PRS:
     """ Print running sort. Items are printed in a sorted list, reprinting with
     every insertion. """
 
-    def __init__(self, key, tostr, stream=None):
+    def __init__(self, key, tostr):
         self.key = key
         self.tostr = tostr
         self.items = None
@@ -331,6 +331,77 @@ class PRS:
                 cons.clear_line()
                 sys.stdout.write(self.tostr(item) + "\n")
             sys.stdout.flush()
+
+
+
+class PCL:
+    """ Print columned list. No running logic needed, just adopts a similar api
+    to PRS to allow for code to use either. """
+
+    def __init__(self, key, tostr, max_width=100, min_width=16, max_columns=3):
+        self.key = key
+        self.tostr = tostr
+        self.max_width = max_width
+        self.min_width = min_width
+        self.max_columns = max_columns
+        self.items = None
+
+    def __enter__(self):
+        self.items = []
+        return self
+
+    def __exit__(self, etype, evalue, traceback):
+        # Just exit on exception.
+        if etype is not None:
+            return False
+        # Nothing to print.
+        if not self.items:
+            return False
+
+        # Otherwise, do the entire print.
+        self.items = sorted(self.items, key=self.key)
+        strings = [self.tostr(item) for item in self.items]
+        max_length = max(len(s) for s in strings)
+
+        # Get the number of rows/columns to print.
+        columns = self.max_width // max_length
+        columns = max(1, min(self.max_columns, columns)) # clamp.
+        rows = (len(self.items) + columns - 1) // columns
+
+        # If we have more than 1 column, gotta calculate how much padding we need
+        # for the non-last columns.
+        if columns > 1:
+            # Calc the smallest width, without shrinking past min width.
+            without_last_column = strings[:(columns - 1) * rows]
+            wlc_max_length = max(len(s) for s in without_last_column)
+            width = max(self.min_width, wlc_max_length + 4)
+
+        # Catch edge cases where some columns are empty.
+        filled_columns = (len(strings) + rows - 1) // rows
+        missing = columns - filled_columns
+        if missing > 0:
+            pass
+            # nglll cannot be bothered. only happens with 4 elems on 3 columns.
+            # happens more for more columns.
+
+        # Print each row.
+        for i in range(rows):
+            row = strings[i::rows]
+            line = ""
+            for item in row[:-1]:
+                line += item.ljust(width, " ")
+            line += row[-1]
+            sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+
+        return False
+
+    def insert(self, elem):
+        if self.items is None:
+            raise ValueError("must be used within a context.")
+
+        # Add the element, not bothering with sort.
+        self.items.append(elem)
 
 
 
@@ -445,14 +516,17 @@ def main():
     tostr = lambda e: pad + "  ".join(c(e) for c in components)
 
 
-    # Special printing if no extra attributes or sorting is requested.
-    if len(components) == 1 and key is Key.name:
-        pass
+    # Special column printing if no extra attributes or sorting are requested.
+    if len(components) == 1 and key == Key.name:
+        obj = PCL(key, tostr)
+    # If any extra attributes or sorting have been requested, do the print-
+    # running-sort single-column vertical list.
+    else:
+        obj = PRS(key, tostr)
 
-
-    # If any extra attributes or sorting has been requested, do the standard
-    # print-running-sort single-column vertical list.
-    with PRS(key, tostr) as prs:
+    # Using this wack api we'eve constructed, process all the items in this
+    # directory.
+    with obj:
         try:
             it = os.scandir(".")
         except OSError as e:
@@ -463,7 +537,7 @@ def main():
                     e = Entry(p)
                     if cull(e):
                         continue
-                    prs.insert(e)
+                    obj.insert(e)
 
 
 if __name__ == "__main__":
