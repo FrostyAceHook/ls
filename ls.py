@@ -119,6 +119,17 @@ class Entry:
 
 class Key:
     @classmethod
+    def reverse(cls, key):
+        # Cheeky wrapper to invert the comparison of the object resulting from
+        # `key(...)`.
+        class Reversed:
+            def __init__(self, *args, **kwargs):
+                self.obj = key(*args, **kwargs)
+            def __lt__(self, other):
+                return not (self.obj < other.obj)
+        return Reversed
+
+    @classmethod
     def name(cls, entry):
         return not entry.isdir(), entry.name().casefold(), entry.name()
 
@@ -202,7 +213,7 @@ class Format:
     @classmethod
     def time(cls, time, long=False):
         if long:
-            return time.strftime("%Y-%m-%d %H:%M:%S")
+            return time.strftime("%Y-%m-%d %H:%M:%S.%f")
         else:
             return time.strftime("%Y-%m-%d")
 
@@ -358,7 +369,7 @@ class PCL:
         if not self.items:
             return False
 
-        # Otherwise, do the entire print.
+        # Do the entire print.
         self.items = sorted(self.items, key=self.key)
         strings = [self.tostr(item) for item in self.items]
         max_length = max(len(s) for s in strings)
@@ -410,54 +421,52 @@ class PCL:
 
 def main():
     parser = argparse.ArgumentParser(prog="ls",
-            description="List directory contents.")
+            description="List directory contents. Note the displayed attributes "
+                "are always in the order of: ctime, mtime, size, subfile count, "
+                "subdir count, path (where each attribute is only present if "
+                "requested).")
 
     parser.add_argument("path", metavar="PATH", nargs="?", default=".",
             help="which directory's contents to list (defaults to here)")
 
-    group_ff = parser.add_mutually_exclusive_group()
-    group_ff.add_argument("-f", "--files", action="store_true",
+    group_fd = parser.add_mutually_exclusive_group()
+    group_fd.add_argument("-f", "--files", action="store_true",
             help="only list files")
-    group_ff.add_argument("-d", "--directories", action="store_true",
+    group_fd.add_argument("-d", "--directories", action="store_true",
             help="only list directories")
 
     group_ctime = parser.add_mutually_exclusive_group()
     group_ctime.add_argument("-c", "--ctime", action="store_true",
-            help="include the creation time of entries")
+            help="include creation time")
     group_ctime.add_argument("-C", "--long-ctime", action="store_true",
-            help="include the creation time of entries, in long format")
+            help="'-c' in long format")
 
     group_mtime = parser.add_mutually_exclusive_group()
     group_mtime.add_argument("-m", "--mtime", action="store_true",
-            help="include the last modification time of entries")
+            help="include last modification time")
     group_mtime.add_argument("-M", "--long-mtime", action="store_true",
-            help="include the last modification time of entries, in long format")
+            help="'-m' in long format")
 
     group_size = parser.add_mutually_exclusive_group()
     group_size.add_argument("-s", "--size", action="store_true",
-            help="include the sizes of entries")
+            help="include byte sizes")
     group_size.add_argument("-S", "--long-size", action="store_true",
-            help="include the sizes of entries, in long format")
+            help="'-s' in long format")
 
     group_count = parser.add_mutually_exclusive_group()
-    group_count.add_argument("-n", action="store_true",
-            help="include the number of subfiles and subdirectories within "
-                "directories")
-    group_count.add_argument("-N", action="store_true",
-            help="include the number of subfiles and subdirectories within "
-                "directories, in long format")
+    group_count.add_argument("-n", "--sub-counts", action="store_true",
+            help="include number of sub-files/directories")
+    group_count.add_argument("-N", "--long-sub-counts", action="store_true",
+            help="'-n' in long format")
 
-    # group_display = parser.add_mutually_exclusive_group()
-    # group_display.add_argument("-t", "--tree", action="store_true",
-    #         help="display recursive contents as tree")
-    # group_display.add_argument("-x", "--sort",
-    #         choices=["c", "m", "s"],
-    #         help="sort the output by some attribute (ctime, mtime, size)")
-
-    parser.add_argument("-x", "--sort", choices=["c", "m", "s", "n"], nargs="?",
-            default=0, const=1,
-            help="sort the output by some attribute (ctime, mtime, size, number "
-                "of subfiles), may be inferred if not explicit")
+    group_sort = parser.add_mutually_exclusive_group()
+    group_sort.add_argument("-x", "--sort", choices=["c", "m", "s", "n"],
+            nargs="?", default=0, const=1,
+            help="sort in ascending order by some attribute; key may be "
+                "inferred if not explicit")
+    group_sort.add_argument("-X", "--reverse-sort", choices=["c", "m", "s", "n"],
+            nargs="?", default=0, const=1,
+            help="'-x' in descending order")
 
     args = parser.parse_args()
 
@@ -478,9 +487,9 @@ def main():
         components.append(lambda e: Format.time(e.mtime(), args.long_mtime))
     if args.size or args.long_size:
         components.append(lambda e: Format.number(e.size(), args.long_size, "B"))
-    if args.n or args.N:
+    if args.sub_counts or args.long_sub_counts:
         def comp(e, n):
-            count = Format.number(n, args.N)
+            count = Format.number(n, args.long_sub_counts)
             if e.isdir():
                 return count
             return " "*len(count)
@@ -488,42 +497,57 @@ def main():
         components.append(lambda e: comp(e, e.subdirs()))
     components.append(lambda e: e.path())
 
-    # Get the key to sort by (defaulting to name).
-    key = Key.name
-    # Check inferred sorting.
-    if args.sort == 1:
-        args.sort = ""
-        if args.ctime or args.long_ctime:
-            args.sort += "c"
-        if args.mtime or args.long_mtime:
-            args.sort += "m"
-        if args.size or args.long_size:
-            args.sort += "s"
-        if args.n or args.N:
-            args.sort += "n"
-        if len(args.sort) != 1:
-            parser.error("argument -x/--sort: cannot infer sort key")
-
-    # Update key.
-    if args.sort:
-        if args.sort == "c":
-            key = Key.ctime
-        if args.sort == "m":
-            key = Key.mtime
-        if args.sort == "s":
-            key = Key.size
-        if args.sort == "n":
-            key = Key.subfiles
-
-
     # Join the thangs to make the complete string. Note the ordering of each
     # attribute is fixed (ctime -> mtime -> size -> counts -> path).
     pad = " " * (len(components) > 1)
     tostr = lambda e: pad + "  ".join(c(e) for c in components)
 
 
+    # Get the key to sort by (defaulting to name).
+    key = Key.name
+    sortby = None
+    # Check inferred sorting.
+    if args.sort == 1 or args.reverse_sort == 1:
+        sortby = ""
+        if args.ctime or args.long_ctime:
+            sortby += "c"
+        if args.mtime or args.long_mtime:
+            sortby += "m"
+        if args.size or args.long_size:
+            sortby += "s"
+        if args.sub_counts or args.long_sub_counts:
+            sortby += "n"
+        if len(sortby) != 1:
+            arg = "-x/--sort" if (args.sort) else "-X/--reverse-sort"
+            if len(sortby) > 1:
+                reason = "too many included attributes"
+            else:
+                reason = "no included attributes"
+            parser.error(f"argument {arg}: cannot infer sort key: {reason}")
+    # Otherwise just grab the explicit.
+    elif args.sort:
+        sortby = args.sort
+    elif args.reverse_sort:
+        sortby = args.reverse_sort
+
+    # Update sorting key.
+    if sortby:
+        if sortby == "c":
+            key = Key.ctime
+        if sortby == "m":
+            key = Key.mtime
+        if sortby == "s":
+            key = Key.size
+        if sortby == "n":
+            key = Key.subfiles
+
+    # Reverse if requested.
+    if args.reverse_sort:
+        key = Key.reverse(key)
+
+
     # Special column printing if no extra attributes or sorting are requested.
-    if len(components) == 1 and key == Key.name:
+    if len(components) == 1 and not sortby:
         obj = PCL(key, tostr)
     # If any extra attributes or sorting have been requested, do the print-
     # running-sort single-column vertical list.
