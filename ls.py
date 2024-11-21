@@ -23,9 +23,34 @@ class Entry:
             self._subdirs = -1
         # But leave dir processing (since its expensive) for when they queried.
 
+    def name(self):
+        """ Returns the name of this entry. """
+        return self._name
+
     def path(self):
-        """ Returns the path of this entry. """
-        return self._name + "/"*(self._isdir)
+        """ Returns the path of this entry, for displaying. """
+        path = self._name + "/"*(self._isdir)
+        quote = False
+
+        # Replace controls codes with codepoints.
+        for i in range(32):
+            quote = quote or (chr(i) in path)
+            path = path.replace(chr(i), repr(chr(i)))
+
+        # Quote also if end or start with weird characters.
+        end_or_start = lambda c: path.startswith(c) or path.endswith(c)
+        if end_or_start(" ") or end_or_start("\"") or end_or_start("'"):
+            quote = True
+
+        if quote:
+            quote = "'"
+            if "'" in path:
+                quote = "\""
+            path = path.replace("\\", "\\\\")
+            path = path.replace(quote, "\\" + quote)
+            path = quote + path + quote
+
+        return path
 
     def isdir(self):
         """ Returns true if this entry is a directory. """
@@ -81,23 +106,21 @@ class Entry:
                 self._subfiles = -1
                 self._subdirs = -1
                 break
-            else:
-                with it:
-                    for p in it:
-                        if p.is_file():
-                            self._subfiles += 1
-                            self._size += p.stat().st_size
-                        else:
-                            self._subdirs += 1
-                            stack.append(p.path)
+            with it:
+                for p in it:
+                    if p.is_file():
+                        self._subfiles += 1
+                        self._size += p.stat().st_size
+                    else:
+                        self._subdirs += 1
+                        stack.append(p.path)
 
 
 
 class Key:
     @classmethod
     def name(cls, entry):
-        p = entry.path()
-        return not entry.isdir(), p.casefold(), p
+        return not entry.isdir(), entry.name().casefold(), entry.name()
 
     @classmethod
     def ctime(cls, entry):
@@ -127,7 +150,8 @@ class Format:
         # long:  "xxxxx PU"
         if num < 0:
             if long:
-                return " ???? ? "
+                u = "?" if (unit) else ""
+                return f" ???? {u} "
             else:
                 return " ???"
 
@@ -154,7 +178,7 @@ class Format:
 
         # Make the final number+prefix+unit.
         if long:
-            suffix = f" {cls.PREFIXES[prefix] + unit:<2}"
+            suffix = f" {cls.PREFIXES[prefix] + unit:<{1 + len(unit)}}"
         else:
             suffix = f"{cls.PREFIXES[prefix]:<1}"
         digits = 5 if (long) else 3
@@ -182,31 +206,6 @@ class Format:
         else:
             return time.strftime("%Y-%m-%d")
 
-
-
-
-# from brutil import cli
-
-# cli.enqueue("'xxxxx PU'")
-# cli.enqueue("Format._number(1, True, 'B')")
-# cli.enqueue("Format._number(900, True, 'B')")
-# cli.enqueue("Format._number(1000, True, 'B')")
-# cli.enqueue("Format._number(1024, True, 'B')")
-# cli.enqueue("Format._number(1024*11.5, True, 'B')")
-# cli.enqueue("Format._number(1024**2, True, 'B')")
-# cli.enqueue("Format._number(1024**2 - 1, True, 'B')")
-
-# cli.enqueue("'xxxP'")
-# cli.enqueue("Format._number(1, False, 'B')")
-# cli.enqueue("Format._number(900, False, 'B')")
-# cli.enqueue("Format._number(1000, False, 'B')")
-# cli.enqueue("Format._number(1024, False, 'B')")
-# cli.enqueue("Format._number(1024*11.5, False, 'B')")
-# cli.enqueue("Format._number(1024**2, False, 'B')")
-# cli.enqueue("Format._number(1024**2 - 1, False, 'B')")
-# cli.cli(globals())
-
-# quit()
 
 
 class cons:
@@ -310,8 +309,7 @@ class PRS:
         return left
 
     def insert(self, elem):
-        if self.items is None:
-            raise ValueError("must be used within a context.")
+        assert self.items is not None
 
         # Make the string now, since it may stall and we don't wanna do that mid-
         # print.
@@ -338,11 +336,13 @@ class PCL:
     """ Print columned list. No running logic needed, just adopts a similar api
     to PRS to allow for code to use either. """
 
-    def __init__(self, key, tostr, max_width=100, min_width=16, max_columns=3):
+    def __init__(self, key, tostr, max_width=100, min_column_width=16, pad=1,
+            max_columns=4):
         self.key = key
         self.tostr = tostr
         self.max_width = max_width
-        self.min_width = min_width
+        self.min_column_width = min_column_width
+        self.pad = pad
         self.max_columns = max_columns
         self.items = None
 
@@ -374,24 +374,27 @@ class PCL:
             # Calc the smallest width, without shrinking past min width.
             without_last_column = strings[:(columns - 1) * rows]
             wlc_max_length = max(len(s) for s in without_last_column)
-            width = max(self.min_width, wlc_max_length + 4)
+            width = max(self.min_column_width, wlc_max_length + 4)
 
         # Catch edge cases where some columns are empty.
         filled_columns = (len(strings) + rows - 1) // rows
-        missing = columns - filled_columns
-        if missing > 0:
-            pass
-            # nglll cannot be bothered. only happens with 4 elems on 3 columns.
-            # happens more for more columns.
+        missing_cols = columns - filled_columns
+        if missing_cols > 0:
+            # Fill the last column except one.
+            missing = rows*columns - 1 - len(strings)
+            for i in range(missing):
+                col = columns - 1 - missing + i
+                at = rows*col + rows - 1
+                strings.insert(at, "")
 
         # Print each row.
         for i in range(rows):
             row = strings[i::rows]
-            line = ""
+            line = [" "*self.pad]
             for item in row[:-1]:
-                line += item.ljust(width, " ")
-            line += row[-1]
-            sys.stdout.write(line + "\n")
+                line.append(item.ljust(width, " "))
+            line.append(row[-1])
+            sys.stdout.write("".join(line) + "\n")
         sys.stdout.flush()
 
         return False
@@ -407,13 +410,16 @@ class PCL:
 
 def main():
     parser = argparse.ArgumentParser(prog="ls",
-            description="List current directory contents.")
+            description="List directory contents.")
+
+    parser.add_argument("path", metavar="PATH", nargs="?", default=".",
+            help="which directory's contents to list (defaults to here)")
 
     group_ff = parser.add_mutually_exclusive_group()
     group_ff.add_argument("-f", "--files", action="store_true",
             help="only list files")
-    group_ff.add_argument("-F", "--folders", action="store_true",
-            help="only list folders")
+    group_ff.add_argument("-d", "--directories", action="store_true",
+            help="only list directories")
 
     group_ctime = parser.add_mutually_exclusive_group()
     group_ctime.add_argument("-c", "--ctime", action="store_true",
@@ -435,10 +441,11 @@ def main():
 
     group_count = parser.add_mutually_exclusive_group()
     group_count.add_argument("-n", action="store_true",
-            help="include the number of subfiles and subfolders within folders")
+            help="include the number of subfiles and subdirectories within "
+                "directories")
     group_count.add_argument("-N", action="store_true",
-            help="include the number of subfiles and subfolders within folders, "
-                "in long format")
+            help="include the number of subfiles and subdirectories within "
+                "directories, in long format")
 
     # group_display = parser.add_mutually_exclusive_group()
     # group_display.add_argument("-t", "--tree", action="store_true",
@@ -447,11 +454,10 @@ def main():
     #         choices=["c", "m", "s"],
     #         help="sort the output by some attribute (ctime, mtime, size)")
 
-    parser.add_argument("-x", "--sort",
-            choices=["c", "m", "s", "n"], nargs="?", default=0, const=1,
-            help="Sort the output by some attribute (ctime, mtime, size, number "
-                "of subfiles).")
-
+    parser.add_argument("-x", "--sort", choices=["c", "m", "s", "n"], nargs="?",
+            default=0, const=1,
+            help="sort the output by some attribute (ctime, mtime, size, number "
+                "of subfiles), may be inferred if not explicit")
 
     args = parser.parse_args()
 
@@ -460,7 +466,7 @@ def main():
     cull = lambda e: False
     if args.files:
         cull = lambda e: e.isdir()
-    if args.folders:
+    if args.directories:
         cull = lambda e: not e.isdir()
 
 
@@ -496,7 +502,7 @@ def main():
         if args.n or args.N:
             args.sort += "n"
         if len(args.sort) != 1:
-            parser.error("cannot infer sort key (from '-x')")
+            parser.error("argument -x/--sort: cannot infer sort key")
 
     # Update key.
     if args.sort:
@@ -528,16 +534,16 @@ def main():
     # directory.
     with obj:
         try:
-            it = os.scandir(".")
+            it = os.scandir(args.path)
         except OSError as e:
             print(f"ls: error: {e}")
-        else:
-            with it:
-                for p in it:
-                    e = Entry(p)
-                    if cull(e):
-                        continue
-                    obj.insert(e)
+            return
+        with it:
+            for p in it:
+                e = Entry(p)
+                if cull(e):
+                    continue
+                obj.insert(e)
 
 
 if __name__ == "__main__":
