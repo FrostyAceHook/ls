@@ -132,8 +132,9 @@ class Entry:
         # Process files now.
         if not self._isdir:
             self._size = dir_entry.stat().st_size
-            self._subfiles = -1
-            self._subdirs = -1
+            # Use -2 to sort files before failed directories.
+            self._subfiles = -2
+            self._subdirs = -2
         # But leave dir processing (since its expensive) for when they queried.
 
     def name(self):
