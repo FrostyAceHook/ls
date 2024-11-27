@@ -2,7 +2,7 @@ import argparse
 import os
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -282,14 +282,34 @@ class Key:
 class Format:
     """ Conversion functions for objects to strings. """
 
-    # 1024-based prefixes.
-    PREFIXES = ["", "k", "M", "G", "T", "P", "E", "Z", "Y", "R", "Q"]
+    @classmethod
+    def _fixedlength(cls, num, length):
+        # return the most-accurate rep of `num` as a `length` character string.
+
+        # Do rounding.
+        s = f"{num:.{length}f}"
+        i = s.index(".")
+        if i > length: # cannot fit within `length` characters.
+            return None
+        d = length - 1 - i if (i < length) else 0
+        num = round(num, d)
+        # Do culling.
+        s = f"{num:.{length}f}"
+        s = s[:length]
+        if "." in s:
+            s = s.rstrip("0").rstrip(".")
+        # Do padding.
+        return f"{s:>{length}}"
 
     @classmethod
     def number(cls, num, long=False, unit=""):
         """ Returns a fixed-width string of the given number. """
         # short: "xxxP"
         # long:  "xxxxx PU"
+
+        # 1024-based prefixes.
+        PREFIXES = ["", "k", "M", "G", "T", "P", "E", "Z", "Y", "R", "Q"]
+
         if num < 0:
             if long:
                 u = "?" if (unit) else ""
@@ -307,7 +327,7 @@ class Format:
         except OverflowError:
             num = float("inf")
         prefix = 0
-        while num >= limit and prefix < len(cls.PREFIXES) - 1:
+        while num >= limit and prefix < len(PREFIXES) - 1:
             num /= 1024
             prefix += 1
 
@@ -320,34 +340,66 @@ class Format:
 
         # Make the final number+prefix+unit.
         if long:
-            suffix = f" {cls.PREFIXES[prefix] + unit:<{1 + len(unit)}}"
+            suffix = f" {PREFIXES[prefix] + unit:<{1 + len(unit)}}"
         else:
-            suffix = f"{cls.PREFIXES[prefix]:<1}"
+            suffix = f"{PREFIXES[prefix]:<1}"
         digits = 5 if (long) else 3
 
         # Special case for short when prefix is "", since we can use the space
-        # for something. If a single-char uit is given, use it for that.
+        # for something. If a single-char unit is given, use it for that.
         # Otherwise, use it for an extra digit.
-        if not long and prefix == 0:
+        if not long and PREFIXES[prefix] == "":
             if not unit:
                 digits += 1
                 suffix = ""
             elif len(unit) == 1:
                 suffix = unit
+        # Convert and make final result.
+        s = cls._fixedlength(num, digits)
+        assert s is not None
+        return f"{s}{suffix}"
 
-        s = f"{num:.{digits}f}"
-        s = s[:digits]
-        if "." in s:
-            s = s.rstrip("0").rstrip(".")
-        return f"{s:>{digits}}{suffix}"
+    # Cache current time, so that all timestamps are relative to the same thing.
+    NOW = datetime.now()
 
     @classmethod
-    def time(cls, time, long=False):
+    def time(cls, time, long=False, now=None):
         """ Returns a fixed-width string of the given datetime object. """
+        # short: "xxxU ago" (how long ago)
+        #    or; " yyyy-mm" (timestamp)
+        # long:  "yyyy-mm-dd HH:MM:SS.UUUUUUU" (timestamp)
+
+        if now is None:
+            now = cls.NOW
+
+        # If long, just return the exact timestamp.
         if long:
             return time.strftime("%Y-%m-%d %H:%M:%S.%f")
-        else:
-            return time.strftime("%Y-%m-%d")
+
+        # Otherwise find a rep for how long ago.
+        ago = now - time
+        UNITS = [
+            ("s ago", timedelta(seconds=1), 120),
+            ("m ago", timedelta(minutes=1), 120),
+            ("h ago", timedelta(hours=1),   48),
+            ("d ago", timedelta(hours=24),  100),
+        ]
+        digits = 3
+        ulength = len(UNITS[0][0])
+
+        for unit, scale, cutoff in UNITS:
+            num = ago / scale
+            # check not beyond cutoff (note this is only done for
+            # understandidababilility)
+            if num >= cutoff:
+                continue
+            s = cls._fixedlength(num, digits)
+            if s is None: # check not too long.
+                continue
+            return f"{s}{unit}"
+
+        # Otherwise too long ago, so just return the month (padded).
+        return f"{time.strftime("%Y-%m"):>{digits + ulength}}"
 
 
 
@@ -558,7 +610,7 @@ def main():
 
     group = parser.add_mutually_exclusive_group()
     group.add_argument("-n", "--sub-counts", action="store_true",
-            help="include number of sub-files/directories")
+            help="include number of sub-files/sub-directories for directories")
     group.add_argument("-N", "--long-sub-counts", action="store_true",
             help="'-n' in long format")
 
@@ -575,7 +627,7 @@ def main():
             help="'-x' in descending order")
 
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("-l", "--single-column", action="store_true",
+    group.add_argument("-1", "--single-column", action="store_true",
             help="display as a single column")
     group.add_argument("--columns", metavar="COUNT", type=int,
             help="display with at-most this many columns")
