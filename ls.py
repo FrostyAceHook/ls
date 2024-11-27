@@ -352,141 +352,173 @@ class Format:
 
 
 class PRS:
-    """ Print running sort. Items are printed in a sorted list, reprinting with
-    every insertion. Use in a context, and is scrubbed fresh with each one. """
+    """ Print running sort. Items are printed in a sorted multi-column list,
+    reprinting with every insertion. Use it in a context, where each context gets
+    fresh contents. """
 
-    def __init__(self, key, tostr):
+    def __init__(self, key, tostr, max_total_width=100, min_width=16, padding=5,
+            max_columns=4, no_running=False, row_wise=False,
+            uniform_width=False):
         self.key = key
         self.tostr = tostr
-        self.items = None
-
-    def __enter__(self):
-        self.items = []
-        return self
-
-    def __exit__(self, etype, evalue, traceback):
-        if etype is None:
-            # If succeeded then we gotta wipe the printed output and reprint the
-            # full outupt.
-            cons.move_up(len(self.items))
-            for item in self.items:
-                cons.clear_line()
-                cons.write(self.tostr(item) + "\n")
-            cons.flush()
-        self.items = None
-        return False
+        self.max_total_width = max_total_width
+        self.min_width = min_width
+        self.padding = padding
+        self.max_columns = max_columns
+        self.no_running = no_running
+        self.row_wise = row_wise
+        self.uniform_width = uniform_width
+        self.items = None # list of (item, tostr(item))
+        self.prev_lines = 0 # number of lines printed before.
 
     def _bsearch(self, elem):
         # Binary search.
         left, right = 0, len(self.items)
         while left < right:
             mid = (left + right) // 2
-            if self.key(self.items[mid]) < self.key(elem):
+            if self.key(self.items[mid][0]) < self.key(elem):
                 left = mid + 1
             else:
                 right = mid
         return left
 
-    def insert(self, elem):
-        """ Inserts the given element, reprinting the sorted list that has been
-        constructed so far. """
-        assert self.items is not None
+    def _max_width_of(self, strings):
+        max_width = max(cons.length(s) for s in strings)
+        max_width += self.padding
+        max_width = max(self.min_width, max_width)
+        return max_width
 
-        # Make the string now, since it may stall and we don't wanna do that mid-
-        # print.
-        self.tostr(elem)
+    def _contents(self, strings, columns):
+        # Single column always works.
+        if columns == 1:
+            return ([s] for s in strings), [self._max_width_of(strings)]
 
-        # Add the element, maintaining the sort.
-        idx = self._bsearch(elem)
-        self.items.insert(idx, elem)
+        # Make a copy to ensure we don't modify the actual object.
+        strings = strings[:]
 
-        # Reprint the elements.
-        space = cons.move_up(len(self.items) - 1)
-        # If there's still space on the screen, add another element.
-        if cons.pos()[0] > 1:
-            space += 1
-        if space > 0: # since -0 = 0
-            for item in self.items[-space:]:
-                cons.clear_line()
-                cons.write(self.tostr(item) + "\n")
-            cons.flush()
+        # Calculate the number of rows required.
+        rows = (len(strings) + columns - 1) // columns
 
+        # Catch a column-wise edge case where some columns would be empty.
+        if not self.row_wise:
+            filled_columns = (len(strings) + rows - 1) // rows
+            missing_cols = columns - filled_columns
+            if missing_cols > 0:
+                # Fill the last column except one.
+                missing = rows*columns - 1 - len(strings)
+                for i in range(missing):
+                    col = columns - 1 - missing + i
+                    at = rows*col + rows - 1
+                    strings.insert(at, "")
 
+        # Pad to a square grid.
+        strings += [""] * (rows*columns - len(strings))
 
-class PCL:
-    """ Print columned list. No running logic needed, just adopts a similar api
-    to PRS to allow for code to use either. """
+        # Make a column-getter.
+        if self.row_wise:
+            columnat = lambda c: [s for i, s in enumerate(strings)
+                                  if i % columns == c]
+        else:
+            columnat = lambda c: [s for i, s in enumerate(strings)
+                                  if c*rows <= i and i < (c + 1)*rows]
 
-    def __init__(self, key, tostr, max_width=100, min_column_width=16, pad=1,
-            max_columns=4):
-        self.key = key
-        self.tostr = tostr
-        self.max_width = max_width
-        self.min_column_width = min_column_width
-        self.pad = pad
-        self.max_columns = max_columns
-        self.items = None
+        # Calculate how much padding we need for each column.
+        widths = [self._max_width_of(columnat(c)) for c in range(columns)]
+
+        # Make width uniform if requested.
+        if self.uniform_width:
+            uniform = max(widths[:-1])
+            for i in range(columns - 1):
+                widths[i] = uniform
+
+        # Calculate if this arrangement is possible.
+        if sum(widths) > self.max_total_width:
+            return None, None
+
+        # Make a row-getter.
+        if self.row_wise:
+            rowat = lambda r: [s for i, s in enumerate(strings)
+                               if r*columns <= i and i < (r + 1)*columns]
+        else:
+            rowat = lambda r: [s for i, s in enumerate(strings)
+                               if i % rows == r]
+
+        # Return the row contents and the column widths.
+        return (rowat(r) for r in range(rows)), widths
+
+    def _lines(self):
+        if not self.items:
+            return []
+        strings = [string for item, string in self.items]
+
+        # Try the column possibilities, in reverse order.
+        for columns in range(self.max_columns, 0, -1):
+            contents, widths = self._contents(strings, columns)
+            if contents is not None: # take the first that works.
+                break
+
+        # Make each line as a string.
+        lines = []
+        for content in contents:
+            line = []
+            # Add slight beginning padding if there's multiple columns.
+            if len(content) > 1:
+                line.append(" ")
+            # Pad the non-last-column elements.
+            for column, item in enumerate(content[:-1]):
+                padding = widths[column] - cons.length(item)
+                line.append(item + " "*padding)
+            line.append(content[-1])
+            lines.append("".join(line))
+        return lines
 
     def __enter__(self):
         self.items = []
         return self
 
     def __exit__(self, etype, evalue, traceback):
-        # Just exit on exception.
-        if etype is not None:
-            return False
-        # Nothing to print.
-        if not self.items:
-            return False
-
-        # Do the entire print.
-        self.items = sorted(self.items, key=self.key)
-        strings = [self.tostr(item) for item in self.items]
-        max_length = max(cons.length(s) for s in strings)
-
-        # Get the number of rows/columns to print.
-        columns = self.max_width // max_length
-        columns = max(1, min(self.max_columns, columns)) # clamp.
-        rows = (len(strings) + columns - 1) // columns
-
-        # If we have more than 1 column, gotta calculate how much padding we need
-        # for the non-last columns.
-        if columns > 1:
-            # Calc the smallest width, without shrinking past min width.
-            without_last_column = strings[:(columns - 1) * rows]
-            wlc_max_length = max(cons.length(s) for s in without_last_column)
-            width = max(self.min_column_width, wlc_max_length + 4)
-
-        # Catch edge cases where some columns are empty.
-        filled_columns = (len(strings) + rows - 1) // rows
-        missing_cols = columns - filled_columns
-        if missing_cols > 0:
-            # Fill the last column except one.
-            missing = rows*columns - 1 - len(strings)
-            for i in range(missing):
-                col = columns - 1 - missing + i
-                at = rows*col + rows - 1
-                strings.insert(at, "")
-
-        # Print each row.
-        for i in range(rows):
-            row = strings[i::rows]
-            line = [" "*self.pad]
-            for item in row[:-1]:
-                line.append(item + " "*(width - cons.length(item)))
-            line.append(row[-1])
-            cons.write("".join(line) + "\n")
-        cons.flush()
-
+        # If succeeded then we gotta wipe the printed output and reprint the full
+        # outupt.
+        if etype is None:
+            lines = self._lines()
+            cons.move_up(self.prev_lines)
+            for line in lines:
+                cons.clear_line()
+                cons.write(line + "\n")
+            cons.flush()
+        # Reset the container.
+        self.items = None
         return False
 
     def insert(self, elem):
-        """ Inserts the given element, adding it to be printed on exit. """
-        if self.items is None:
-            raise ValueError("must be used within a context.")
+        """ Inserts the given element, reprinting the sorted list that has been
+        constructed so far. """
+        assert self.items is not None
 
-        # Add the element, not bothering with sort.
-        self.items.append(elem)
+        # note this algorithm only works since each elements with add at-most one
+        # extra line.
+        # ah wait that means this isnt sufficient since an output going from say
+        # 3 to 2 columns could add more than 1 line.
+
+        # Add the element, maintaining the sort.
+        idx = self._bsearch(elem)
+        self.items.insert(idx, (elem, self.tostr(elem)))
+
+        # Don't print running if not requested.
+        if self.no_running:
+            return
+
+        # Reprint the elements.
+        lines = self._lines()
+        space = cons.move_up(self.prev_lines)
+        # If there's still space on the screen and we have another line, do it.
+        if cons.pos()[0] > 1:
+            space = len(lines)
+        if space > 0: # since -0 = 0
+            for line in lines[-space:]:
+                cons.clear_line()
+                cons.write(line + "\n")
+        self.prev_lines = space
 
 
 
@@ -500,57 +532,67 @@ def main():
     parser.add_argument("path", metavar="PATH", nargs="?", default=".",
             help="which directory's contents to list (defaults to here)")
 
-    group_fd = parser.add_mutually_exclusive_group()
-    group_fd.add_argument("-f", "--files", action="store_true",
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("-f", "--files", action="store_true",
             help="only list files")
-    group_fd.add_argument("-d", "--directories", action="store_true",
+    group.add_argument("-d", "--directories", action="store_true",
             help="only list directories")
 
-    group_ctime = parser.add_mutually_exclusive_group()
-    group_ctime.add_argument("-c", "--ctime", action="store_true",
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("-c", "--ctime", action="store_true",
             help="include creation time")
-    group_ctime.add_argument("-C", "--long-ctime", action="store_true",
+    group.add_argument("-C", "--long-ctime", action="store_true",
             help="'-c' in long format")
 
-    group_mtime = parser.add_mutually_exclusive_group()
-    group_mtime.add_argument("-m", "--mtime", action="store_true",
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("-m", "--mtime", action="store_true",
             help="include last modification time")
-    group_mtime.add_argument("-M", "--long-mtime", action="store_true",
+    group.add_argument("-M", "--long-mtime", action="store_true",
             help="'-m' in long format")
 
-    group_size = parser.add_mutually_exclusive_group()
-    group_size.add_argument("-s", "--size", action="store_true",
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("-s", "--size", action="store_true",
             help="include size")
-    group_size.add_argument("-S", "--long-size", action="store_true",
+    group.add_argument("-S", "--long-size", action="store_true",
             help="'-s' in long format")
 
-    group_count = parser.add_mutually_exclusive_group()
-    group_count.add_argument("-n", "--sub-counts", action="store_true",
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("-n", "--sub-counts", action="store_true",
             help="include number of sub-files/directories")
-    group_count.add_argument("-N", "--long-sub-counts", action="store_true",
+    group.add_argument("-N", "--long-sub-counts", action="store_true",
             help="'-n' in long format")
 
-    group_sort = parser.add_mutually_exclusive_group()
-    group_sort.add_argument("-x", "--sort",
-            choices=["c", "m", "s", "nf", "nd"],
-            nargs="?", default=0, const=1,
+    INFERRED = object()
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("-x", "--sort",
+            choices=["n", "c", "m", "s", "nf", "nd"],
+            nargs="?", default=None, const=INFERRED,
             help="sort in ascending order by some attribute; key may be "
                 "inferred if not explicit")
-    group_sort.add_argument("-X", "--reverse-sort",
-            choices=["c", "m", "s", "nf", "nd"],
-            nargs="?", default=0, const=1,
+    group.add_argument("-X", "--reverse-sort",
+            choices=["n", "c", "m", "s", "nf", "nd"],
+            nargs="?", default=None, const=INFERRED,
             help="'-x' in descending order")
 
-    parser.add_argument("--no-col", "--no-colour", "--no-color",
-            action="store_true",
-            help="disable colour in output")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("-l", "--single-column", action="store_true",
+            help="display as a single column")
+    group.add_argument("--columns", metavar="COUNT", type=int,
+            help="display with at-most this many columns")
+
+    parser.add_argument("--no-colour", action="store_true",
+            help="display without colour")
+
+    parser.add_argument("--no-running", action="store_true",
+            help="display only once finished")
+
+    parser.add_argument("--row-wise", action="store_true",
+            help="display sorted row-wise instead of column-wise")
+
+    parser.add_argument("--uniform-width", action="store_true",
+            help="display with equal-width columns")
 
     args = parser.parse_args()
-
-
-    # Disable colour :(
-    if args.no_col:
-        cons.Colour.ENABLED = False
 
 
     # Get the filter for what to display.
@@ -596,12 +638,10 @@ def main():
     tostr = lambda e: pad + "  ".join(c(e) for c in components)
 
 
-    # Get the key to sort by (defaulting to name).
-    key = Key.name
-    sortby = None
+    # Get the key to sort by.
+    sortby = ""
     # Check inferred sorting.
-    if args.sort == 1 or args.reverse_sort == 1:
-        sortby = ""
+    if args.sort is INFERRED or args.reverse_sort is INFERRED:
         if args.ctime or args.long_ctime:
             sortby += "c"
         if args.mtime or args.long_mtime:
@@ -610,60 +650,68 @@ def main():
             sortby += "s"
         if args.sub_counts or args.long_sub_counts:
             sortby += "too many"
-        if len(sortby) != 1:
+        if len(sortby) > 1:
             arg = "-x/--sort" if (args.sort) else "-X/--reverse-sort"
-            if len(sortby) > 1:
-                reason = "too many included attributes"
-            else:
-                reason = "no included attributes"
-            parser.error(f"argument {arg}: cannot infer sort key: {reason}")
+            parser.error(f"argument {arg}: cannot infer sort key: too many "
+                    "included attributes")
     # Otherwise just grab the explicit.
     elif args.sort:
         sortby = args.sort
     elif args.reverse_sort:
         sortby = args.reverse_sort
 
-    # Update sorting key.
-    if sortby:
-        if sortby == "c":
-            key = Key.ctime
-        if sortby == "m":
-            key = Key.mtime
-        if sortby == "s":
-            key = Key.size
-        if sortby == "nf":
-            key = Key.subfiles
-        if sortby == "nd":
-            key = Key.subdirs
+    # Get the sorting key (defaulting to name).
+    key = Key.name
+    if sortby == "n":
+        key = Key.name
+    if sortby == "c":
+        key = Key.ctime
+    if sortby == "m":
+        key = Key.mtime
+    if sortby == "s":
+        key = Key.size
+    if sortby == "nf":
+        key = Key.subfiles
+    if sortby == "nd":
+        key = Key.subdirs
 
     # Reverse if requested.
     if args.reverse_sort:
         key = Key.reverse(key)
 
 
-    # Special column printing if no extra attributes or sorting are requested.
-    if len(components) == 1 and not sortby:
-        obj = PCL(key, tostr)
-    # If any extra attributes or sorting have been requested, do the print-
-    # running-sort single-column vertical list.
-    else:
-        obj = PRS(key, tostr)
+    # Get the number of columns in the output (defaulting to 4 if no extra info,
+    # otherwise single-column).
+    columns = 1 if (len(components) > 1) else 4
+    if args.single_column:
+        columns = 1
+    if args.columns is not None:
+        columns = args.columns
 
-    # Using this wack api we'eve constructed, process all the items in this
+
+    # Disable colour :(
+    if args.no_colour:
+        cons.Colour.ENABLED = False
+
+
+    # Make the printing object.
+    prs = PRS(key, tostr, max_columns=columns, no_running=args.no_running,
+            row_wise=args.row_wise, uniform_width=args.uniform_width)
+
+    # Using this wack api we've constructed, process all the items in this
     # directory.
-    with obj:
-        try:
-            it = os.scandir(args.path)
-        except OSError as e:
-            cons.write(f"ls: error: {e}")
-            cons.flush()
-            return
-        with it:
-            for p in it:
-                e = Entry(p)
-                if cull(e):
-                    continue
-                obj.insert(e)
+    try:
+        it = os.scandir(args.path)
+    except OSError as e:
+        cons.write(f"ls: error: {e}")
+        cons.flush()
+        return
+    with prs, it:
+        for p in it:
+            e = Entry(p)
+            if cull(e):
+                continue
+            prs.insert(e)
 
 
 if __name__ == "__main__":
