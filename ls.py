@@ -1,6 +1,7 @@
 import argparse
 import os
 import re
+import shutil
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -36,12 +37,30 @@ class cons:
     # hack to enable the control sequences.
     os.system("")
 
+    @classmethod
+    def clear_line(cls):
+        """ Clears the line under the cursor. """
+        cls.write("\x1B[2K\r")
+
+    @classmethod
+    def move_up(cls, by):
+        """ Moves the cursor up by `by` lines. Note that if this may stop short
+        if the cursor hits the top of the console. """
+        if by <= 0:
+            return 0
+        cls.write(f"\x1B[{by}A")
+
     class Colour:
+        """ Colouring text. May be used as a context (non-nested) to colour all
+        text printed while in it. """
+
         ENABLED = True
         def __init__(self, cid):
             self.cid = cid
 
         def __call__(self, string):
+            """ Returns the given string with control codes inserted to colour
+            it. """
             if self.ENABLED:
                 return f"\x1B[38;5;{self.cid}m{string}\x1B[0m"
             return string
@@ -53,66 +72,6 @@ class cons:
             if self.ENABLED:
                 cons.write("\x1B[0m")
             return False
-
-    @classmethod
-    def pos(cls):
-        """ Returns the current cursor position, as 1-based row,column. """
-        # https://stackoverflow.com/a/69582478
-
-        is_windows = (sys.platform == "win32")
-        if is_windows:
-            import ctypes
-            import ctypes.wintypes
-        else:
-            import termios
-
-        if is_windows:
-            old_stdin_mode = ctypes.wintypes.DWORD()
-            old_stdout_mode = ctypes.wintypes.DWORD()
-            kernel32 = ctypes.windll.kernel32
-            stdin = kernel32.GetStdHandle(-10)
-            stdout = kernel32.GetStdHandle(-11)
-            kernel32.GetConsoleMode(stdin, ctypes.byref(old_stdin_mode))
-            kernel32.SetConsoleMode(stdin, 0)
-            kernel32.GetConsoleMode(stdout, ctypes.byref(old_stdout_mode))
-            kernel32.SetConsoleMode(stdout, 7)
-        else:
-            old_stdin_mode = termios.tcgetattr(sys.stdin)
-            attr = termios.tcgetattr(sys.stdin)
-            attr[3] &= ~(termios.ECHO | termios.ICANON)
-            termios.tcsetattr(sys.stdin, termios.TCSAFLUSH, attr)
-        try:
-            cls.write("\x1B[6n")
-            cls.flush()
-            response = ""
-            while not response.endswith("R"):
-                response += sys.stdin.read(1)
-            match = re.match(r".*\[(\d+);(\d+)R", response)
-        finally:
-            if is_windows:
-                kernel32.SetConsoleMode(stdin, old_stdin_mode)
-                kernel32.SetConsoleMode(stdout, old_stdout_mode)
-            else:
-                termios.tcsetattr(sys.stdin, termios.TCSAFLUSH, old_stdin_mode)
-        if match:
-            return (int(match.group(1)), int(match.group(2)))
-        return (-1, -1)
-
-    @classmethod
-    def clear_line(cls):
-        """ Clears the line under the cursor. """
-        cls.write("\x1B[2K\r")
-
-    @classmethod
-    def move_up(cls, by):
-        """ Attempts to move the cursor up by `by` lines. Returns the number of
-        lines it actually moved up. """
-        if by <= 0:
-            return 0
-        y, _ = cls.pos()
-        do = min(y - 1, by)
-        cls.write(f"\x1B[{do}A")
-        return do
 
 
 
@@ -143,32 +102,17 @@ class Entry:
 
     def path(self):
         """ Returns the path of this entry, for displaying. """
-        path = self._name + "/"*(self._isdir)
-        quote = False
-
-        # Replace controls codes with codepoints.
-        for i in range(32):
-            quote = quote or (chr(i) in path)
-            path = path.replace(chr(i), repr(chr(i)))
-
-        # Quote also if end or start with weird characters.
-        end_or_start = lambda c: path.startswith(c) or path.endswith(c)
-        if end_or_start(" ") or end_or_start("\"") or end_or_start("'"):
-            quote = True
-
-        if quote:
-            quote = "'"
-            if "'" in path:
-                quote = "\""
-            path = path.replace("\\", "\\\\")
-            path = path.replace(quote, "\\" + quote)
-            path = quote + path + quote
-
-        return path
+        return self._name + "/"*(self._isdir)
 
     def isdir(self):
         """ Returns true if this entry is a directory. """
         return self._isdir
+
+    def ext(self):
+        """ Return the extension of this entry. """
+        if self._isdir or "." not in self._name:
+            return ""
+        return self._name[self._name.rfind("."):]
 
     def ctime(self):
         """ Returns the creation time of this entry, as a datetime object. """
@@ -253,6 +197,11 @@ class Key:
         return not entry.isdir(), entry.name().casefold(), entry.name()
 
     @classmethod
+    def ext(cls, entry):
+        """ Use as a sort key to sort by entry extension. """
+        return entry.ext().casefold(), entry.ext(), *cls.name(entry)
+
+    @classmethod
     def ctime(cls, entry):
         """ Use as a sort key to sort by entry creation time. """
         return entry.ctime(), *cls.name(entry)
@@ -300,6 +249,39 @@ class Format:
             s = s.rstrip("0").rstrip(".")
         # Do padding.
         return f"{s:>{length}}"
+
+
+    @classmethod
+    def path(cls, path):
+        CONTROL_CODES = [chr(i) for i in range(0x00, 0x20)]
+        CONTROL_CODES += [chr(i) for i in range(0x7F, 0xA0)]
+        quote = False
+
+        # Quote if end or start with weird characters.
+        end_or_start = lambda c: path.startswith(c) or path.endswith(c)
+        if end_or_start(" ") or end_or_start("\"") or end_or_start("'"):
+            quote = True
+
+        # Quote if any control codes are present.
+        if any(i in path for i in CONTROL_CODES):
+            quote = True
+
+        # Do standard quoting stuff.
+        if quote:
+            quote = "'"
+            if "'" in path:
+                quote = "\""
+            path = path.replace("\\", "\\\\")
+            path = path.replace(quote, "\\" + quote)
+            path = quote + path + quote
+
+        # After escaping everything, replace the control codes with escape
+        # sequences.
+        for i in CONTROL_CODES:
+            path = path.replace(i, repr(i)[1:-1])
+
+        return path
+
 
     @classmethod
     def number(cls, num, long=False, unit=""):
@@ -359,6 +341,7 @@ class Format:
         assert s is not None
         return f"{s}{suffix}"
 
+
     # Cache current time, so that all timestamps are relative to the same thing.
     NOW = datetime.now()
 
@@ -410,7 +393,7 @@ class PRS:
 
     def __init__(self, key, tostr, max_total_width=100, min_width=16, padding=5,
             max_columns=4, no_running=False, row_wise=False,
-            uniform_width=False):
+            uniform_width=False, spacing=timedelta(seconds=0.1)):
         self.key = key
         self.tostr = tostr
         self.max_total_width = max_total_width
@@ -420,8 +403,10 @@ class PRS:
         self.no_running = no_running
         self.row_wise = row_wise
         self.uniform_width = uniform_width
+        self.spacing = spacing
         self.items = None # list of (item, tostr(item))
-        self.prev_lines = 0 # number of lines printed before.
+        self.prev_lines = None # number of lines printed before.
+        self.prev_time = None # time of previous print.
 
     def _bsearch(self, elem):
         # Binary search.
@@ -526,6 +511,8 @@ class PRS:
 
     def __enter__(self):
         self.items = []
+        self.prev_lines = 0
+        self.prev_time = None
         return self
 
     def __exit__(self, etype, evalue, traceback):
@@ -540,17 +527,15 @@ class PRS:
             cons.flush()
         # Reset the container.
         self.items = None
+        self.prev_lines = 0
+        self.prev_time = None
         return False
+
 
     def insert(self, elem):
         """ Inserts the given element, reprinting the sorted list that has been
         constructed so far. """
         assert self.items is not None
-
-        # note this algorithm only works since each elements with add at-most one
-        # extra line.
-        # ah wait that means this isnt sufficient since an output going from say
-        # 3 to 2 columns could add more than 1 line.
 
         # Add the element, maintaining the sort.
         idx = self._bsearch(elem)
@@ -560,26 +545,37 @@ class PRS:
         if self.no_running:
             return
 
+        # Don't print if the most-recent print was not long ago.
+        now = datetime.now()
+        if self.prev_time is not None:
+            if now - self.prev_time < self.spacing:
+                return
+        self.prev_time = now
+
         # Reprint the elements.
         lines = self._lines()
-        space = cons.move_up(self.prev_lines)
-        # If there's still space on the screen and we have another line, do it.
-        if cons.pos()[0] > 1:
-            space = len(lines)
+
+        # Overwrite the previous print.
+        cons.move_up(self.prev_lines)
+        # Try to use all the lines on the screen, leaving space for the
+        # terminating \n.
+        space = shutil.get_terminal_size().lines - 1
+        self.prev_lines = 0
         if space > 0: # since -0 = 0
             for line in lines[-space:]:
                 cons.clear_line()
                 cons.write(line + "\n")
-        self.prev_lines = space
+                self.prev_lines += 1
+            cons.flush()
 
 
 
 def main():
     parser = argparse.ArgumentParser(prog="ls",
             description="List directory contents. Note the displayed attributes "
-                "are always in the order of: ctime, mtime, subfile count, "
-                "subdir count, size, path (where each attribute is only present "
-                "if requested).")
+                "are always in the order of: creation time, last modification "
+                "time, number of sub-files, number of sub-directories, size, "
+                "path (where each attribute is only present if requested).")
 
     parser.add_argument("path", metavar="PATH", nargs="?", default=".",
             help="which directory's contents to list (defaults to here)")
@@ -603,26 +599,37 @@ def main():
             help="'-m' in long format")
 
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("-s", "--size", action="store_true",
-            help="include size")
-    group.add_argument("-S", "--long-size", action="store_true",
-            help="'-s' in long format")
-
-    group = parser.add_mutually_exclusive_group()
     group.add_argument("-n", "--sub-counts", action="store_true",
             help="include number of sub-files/sub-directories for directories")
     group.add_argument("-N", "--long-sub-counts", action="store_true",
             help="'-n' in long format")
 
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("-s", "--size", action="store_true",
+            help="include size")
+    group.add_argument("-S", "--long-size", action="store_true",
+            help="'-s' in long format")
+
+    parser.add_argument("-e", "--extensions", action="store_true",
+            help="highlight extensions")
+
     INFERRED = object()
     group = parser.add_mutually_exclusive_group()
     group.add_argument("-x", "--sort",
-            choices=["n", "c", "m", "s", "nf", "nd"],
+            choices=["n", "c", "m", "nf", "nd", "s", "e"],
             nargs="?", default=None, const=INFERRED,
-            help="sort in ascending order by some attribute; key may be "
-                "inferred if not explicit")
+            help="sort in ascending order by some key, which may be inferred if "
+                "not explicit"
+                "; n - name"
+                "; c - creation time"
+                "; m - last modification time"
+                "; nf - number of sub-files"
+                "; nd - number of sub-directories"
+                "; s - size"
+                "; e - extensions"
+            )
     group.add_argument("-X", "--reverse-sort",
-            choices=["n", "c", "m", "s", "nf", "nd"],
+            choices=["n", "c", "m", "nf", "nd", "s", "e"],
             nargs="?", default=None, const=INFERRED,
             help="'-x' in descending order")
 
@@ -656,36 +663,54 @@ def main():
 
 
     # Create each of the string/output components.
-    palette = [63, 98, 126, 43, 80, 120]
-    # roughly: blue, purple, magenta, cyan, file=light blue, dir=light green.
+    P = { # colour palette.
+        "ctime": cons.Colour(63), # blue
+        "mtime": cons.Colour(98), # purple
+        "sub_counts": cons.Colour(126), # magenta
+        "size": cons.Colour(43), # cyan
+        "ext": cons.Colour(220), # gold
+        "file": cons.Colour(80), # light blue
+        "dir": cons.Colour(120), # light green
+    }
     components = []
     if args.ctime or args.long_ctime:
-        col = cons.Colour(palette[0])
-        f = lambda e, c=col: c(Format.time(e.ctime(), args.long_ctime))
+        f = lambda e: P["ctime"](Format.time(e.ctime(), args.long_ctime))
         components.append(f)
     if args.mtime or args.long_mtime:
-        col = cons.Colour(palette[1])
-        f = lambda e, c=col: c(Format.time(e.mtime(), args.long_mtime))
+        f = lambda e: P["mtime"](Format.time(e.mtime(), args.long_mtime))
         components.append(f)
     if args.sub_counts or args.long_sub_counts:
-        col = cons.Colour(palette[2])
-        def comp(e, n, c=col):
-            count = c(Format.number(n, args.long_sub_counts))
+        def comp(e, n):
+            count = P["sub_counts"](Format.number(n, args.long_sub_counts))
             if e.isdir():
                 return count
             return " "*cons.length(count)
         components.append(lambda e: comp(e, e.subfiles()))
         components.append(lambda e: comp(e, e.subdirs()))
     if args.size or args.long_size:
-        col = cons.Colour(palette[3])
-        f = lambda e, c=col: c(Format.number(e.size(), args.long_size, "B"))
+        f = lambda e: P["size"](Format.number(e.size(), args.long_size, "B"))
         components.append(f)
 
-    f = lambda e: cons.Colour(palette[4 + e.isdir()])(e.path())
-    components.append(f)
+    def pathstring(e):
+        path = Format.path(e.path())
+        if e.isdir():
+            return P["dir"](path)
+        if not args.extensions or "." not in path:
+            return P["file"](path)
+        # otherwise gotta highlight extension.
+        if path[0] == "'" or path[0] == "\"": # if quoted
+            # Exclude the quote in the highlight.
+            a = path[:path.rfind(".")]
+            b = path[path.rfind("."):-1]
+            c = path[-1]
+            return P["file"](a) + P["ext"](b) + P["file"](c)
+        a = path[:path.rfind(".")]
+        b = path[path.rfind("."):]
+        return P["file"](a) + P["ext"](b)
+    components.append(pathstring)
 
     # Join the thangs to make the complete string. Note the ordering of each
-    # attribute is fixed (ctime -> mtime -> size -> counts -> path).
+    # attribute is fixed.
     pad = " " * (len(components) > 1)
     tostr = lambda e: pad + "  ".join(c(e) for c in components)
 
@@ -698,10 +723,12 @@ def main():
             sortby += "c"
         if args.mtime or args.long_mtime:
             sortby += "m"
-        if args.size or args.long_size:
-            sortby += "s"
         if args.sub_counts or args.long_sub_counts:
             sortby += "too many"
+        if args.size or args.long_size:
+            sortby += "s"
+        if args.extensions:
+            sortby += "e"
         if len(sortby) > 1:
             arg = "-x/--sort" if (args.sort) else "-X/--reverse-sort"
             parser.error(f"argument {arg}: cannot infer sort key: too many "
@@ -720,12 +747,14 @@ def main():
         key = Key.ctime
     if sortby == "m":
         key = Key.mtime
-    if sortby == "s":
-        key = Key.size
     if sortby == "nf":
         key = Key.subfiles
     if sortby == "nd":
         key = Key.subdirs
+    if sortby == "s":
+        key = Key.size
+    if sortby == "e":
+        key = Key.ext
 
     # Reverse if requested.
     if args.reverse_sort:
@@ -734,7 +763,7 @@ def main():
 
     # Get the number of columns in the output (defaulting to 4 if no extra info,
     # otherwise single-column).
-    columns = 1 if (len(components) > 1) else 4
+    columns = 1 if (len(components) > 1 or args.extensions) else 4
     if args.single_column:
         columns = 1
     if args.columns is not None:
@@ -755,7 +784,7 @@ def main():
     try:
         it = os.scandir(args.path)
     except OSError as e:
-        cons.write(f"ls: error: {e}")
+        cons.write(f"ls: error: {e}\n")
         cons.flush()
         return
     with prs, it:
