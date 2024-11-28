@@ -796,4 +796,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        cons.write("Interrupted.\n")
+        cons.flush()
+        sys.exit(130)
