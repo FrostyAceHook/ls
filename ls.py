@@ -636,6 +636,8 @@ def main():
     group = parser.add_mutually_exclusive_group()
     group.add_argument("-1", "--single-column", action="store_true",
             help="display as a single column")
+    group.add_argument("-4", "--four-columns", action="store_true",
+            help="display with four columns")
     group.add_argument("--columns", metavar="COUNT", type=int,
             help="display with at-most this many columns")
 
@@ -766,6 +768,8 @@ def main():
     columns = 1 if (len(components) > 1 or args.extensions) else 4
     if args.single_column:
         columns = 1
+    if args.four_columns:
+        columns = 4
     if args.columns is not None:
         columns = args.columns
 
